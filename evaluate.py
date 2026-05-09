@@ -9,7 +9,7 @@ from models.vqc_model import create_vqc
 
 def evaluate():
     # Recreate model and load parameters
-    vqc = create_vqc(num_qubits=4)
+    vqc = create_vqc(num_qubits=6)
     with open("saved_models/vqc_params.pkl", "rb") as f:
         weights = pickle.load(f)
     vqc._fit_result = SimpleNamespace(x=weights)

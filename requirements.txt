@@ -1,6 +1,7 @@
 qiskit
 qiskit-machine-learning
 qiskit-aer
+qiskit-algorithms
 numpy
 scikit-learn
 matplotlib
@@ -8,3 +9,5 @@ pandas
 jupyter
 seaborn
 tqdm
+scipy
+pyyaml

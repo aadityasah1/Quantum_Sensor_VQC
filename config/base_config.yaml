@@ -1,0 +1,40 @@
+experiment:
+  name: "vqc_sensor_v2"
+  seeds: [42, 123, 456, 789, 1011]
+  n_folds: 5
+
+data:
+  n_samples: 800
+  n_features: 8
+  n_classes: 2
+  signal_snr: 3.0
+  test_split: 0.20
+  val_split: 0.15
+
+vqc:
+  n_qubits: 8
+  feature_map: "zz"
+  ansatz: "hardware_efficient"
+  reps: 3
+  init_strategy: "near_identity"
+  optimizer: "spsa"
+  max_iter: 300
+  shots: 1024
+
+noise:
+  profile: "medium"
+  depolarizing_1q: 0.001
+  depolarizing_2q: 0.01
+  t1_us: 100
+  t2_us: 80
+  readout_error: 0.02
+  gate_time_1q_ns: 50
+  gate_time_2q_ns: 300
+
+mitigation:
+  zne_enabled: true
+  zne_scale_factors: [1, 3, 5]
+
+sweep:
+  noise_levels: [0.0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.15, 0.2]
+  noise_param: "depolarizing_2q"

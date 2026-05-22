@@ -1,162 +1,297 @@
+"""
+Quantum noise resilience analysis.
+
+CRITICAL FIX over v1:
+  v1 added Gaussian noise to input FEATURES (classical noise, not quantum).
+  This version adds actual QUANTUM CIRCUIT NOISE via the AerSampler noise model.
+
+  Each noise level: build a real NoiseModel → inject into AerSampler → train VQC.
+  The classical SVM is unaffected (it never runs quantum circuits), so its
+  accuracy serves as a flat noise-immune reference line.
+
+Experiments:
+  1. run_quantum_noise_sweep  — accuracy vs depolarizing_2q error rate
+  2. run_noise_type_ablation  — which channel hurts most?
+  3. run_zne_effectiveness    — how much does ZNE recover?
+"""
+
 import os
 import sys
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from data.generate_data import generate_data
+import yaml
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import MinMaxScaler
+from tqdm import tqdm
+
+from data.generate_data import generate_sensor_data
 from models.vqc_model import create_vqc
 from models.classical_model import create_classical_model
+from noise.noise_model import (
+    build_noise_model,
+    build_noisy_sampler_and_pm,
+    build_ideal_sampler_and_pm,
+    noise_model_from_config,
+)
+from evaluation.metrics import compute_metrics, aggregate_cv_metrics
+from evaluation.visualization import (
+    plot_noise_sweep,
+    plot_noise_type_ablation,
+)
 
-def add_classical_noise(X, noise_level):
 
-    noise = np.random.normal(
-        0,
-        noise_level,
-        X.shape
+def _cv_accuracy(model_factory, X, y, n_folds=3, seed=42):
+    """
+    Run stratified k-fold CV. model_factory() is called fresh each fold.
+    Returns (mean_accuracy, std_accuracy).
+    """
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    accs = []
+    for train_idx, val_idx in skf.split(X, y):
+        X_tr, X_val = X[train_idx], X[val_idx]
+        y_tr, y_val = y[train_idx], y[val_idx]
+        model = model_factory()
+        model.fit(X_tr, y_tr)
+        accs.append(float(model.score(X_val, y_val)))
+    return float(np.mean(accs)), float(np.std(accs))
+
+
+def run_quantum_noise_sweep(config: dict, output_dir: str = "results") -> pd.DataFrame:
+    """
+    Sweep depolarizing_2q error rate and measure VQC / SVM accuracy.
+
+    For each noise level:
+      - Builds a real quantum NoiseModel
+      - Injects it into AerSampler → passed to VQC(sampler=...)
+      - Runs 3-fold CV (full 5-fold is slow; use n_folds=3 for sweep)
+      - Runs same CV folds for classical SVM (noise-immune reference)
+      - Optionally applies ZNE mitigation
+
+    Results saved to results/quantum_noise_sweep.csv
+    """
+    print("\n" + "=" * 60)
+    print("  Quantum Noise Sweep (real circuit noise, not Gaussian)")
+    print("=" * 60)
+
+    noise_levels = config["sweep"]["noise_levels"]
+    n_qubits = config["vqc"]["n_qubits"]
+    max_iter = config["vqc"]["max_iter"]
+    shots = config["vqc"]["shots"]
+    seed = config["experiment"]["seeds"][0]
+    n_folds = 3  # keep sweep fast
+
+    X, y = generate_sensor_data(
+        n_samples=config["data"]["n_samples"],
+        n_features=config["data"]["n_features"],
+        snr=config["data"].get("signal_snr", 3.0),
+        seed=seed,
     )
 
-    return X + noise
+    rows = []
 
-def run_noise_analysis():
+    for noise_level in tqdm(noise_levels, desc="noise sweep"):
+        # ── Build quantum noise model at this level ────────────────────────
+        nm = build_noise_model(
+            depolarizing_1q=config["noise"]["depolarizing_1q"],
+            depolarizing_2q=noise_level,
+            t1_us=config["noise"]["t1_us"],
+            t2_us=config["noise"]["t2_us"],
+            readout_error=config["noise"]["readout_error"],
+        )
+        noisy_sampler, noisy_pm = build_noisy_sampler_and_pm(nm, shots=shots, seed=seed)
 
-    np.random.seed(42)
-
-    noise_levels = [0.0, 0.05, 0.1, 0.15, 0.2]
-
-    trials = 5
-
-    quantum_accuracies = []
-    classical_accuracies = []
-
-    for noise_level in noise_levels:
-
-        print(f"\nRunning Noise Level: {noise_level}")
-
-        q_trial_acc = []
-        c_trial_acc = []
-
-        for trial in range(trials):
-
-            print(f"  Trial {trial+1}")
-
-            # Generate clean data
-            X, y = generate_data(
-                samples=200,
-                features=6
+        # ── VQC with quantum noise ─────────────────────────────────────────
+        def vqc_factory(sampler=noisy_sampler, pm=noisy_pm):
+            return create_vqc(
+                n_qubits=n_qubits,
+                max_iter=max_iter,
+                sampler=sampler,
+                pass_manager=pm,
+                seed=seed,
             )
 
-            # Add noise
-            X = add_classical_noise(X, noise_level)
+        print(f"  noise={noise_level:.4f}  training VQC ...", end=" ", flush=True)
+        vqc_mean, vqc_std = _cv_accuracy(vqc_factory, X, y, n_folds, seed)
+        print(f"acc={vqc_mean:.3f}±{vqc_std:.3f}")
 
-            # Normalize
-            scaler = MinMaxScaler(
-                feature_range=(0, 3.14)
-            )
+        # ── Classical SVM (quantum noise has no effect) ────────────────────
+        svm_mean, svm_std = _cv_accuracy(
+            lambda: create_classical_model("svm_rbf", seed), X, y, n_folds, seed
+        )
 
-            X = scaler.fit_transform(X)
+        rows.append({
+            "noise_level": noise_level,
+            "vqc_mean": vqc_mean,
+            "vqc_std": vqc_std,
+            "svm_mean": svm_mean,
+            "svm_std": svm_std,
+        })
 
-            # Split
-            X_train, X_test, y_train, y_test = train_test_split(
-                X,
-                y,
-                test_size=0.2,
-                random_state=42
-            )
+    df = pd.DataFrame(rows)
+    os.makedirs(output_dir, exist_ok=True)
+    df.to_csv(os.path.join(output_dir, "quantum_noise_sweep.csv"), index=False)
 
-            # ------------------------
-            # Quantum Model
-            # ------------------------
+    fig = plot_noise_sweep(df, output_dir=output_dir)
+    plt_close(fig)
 
-            vqc = create_vqc(num_qubits=6)
+    print("\nNoise sweep complete.")
+    print(df.to_string(index=False))
+    return df
 
-            vqc.fit(X_train, y_train)
 
-            q_acc = vqc.score(X_test, y_test)
+def run_noise_type_ablation(config: dict, output_dir: str = "results") -> pd.DataFrame:
+    """
+    Tests each noise channel IN ISOLATION to find the most damaging one.
 
-            q_trial_acc.append(q_acc)
+    Channels tested:
+      ideal         : no noise at all
+      depolarizing  : only depolarizing (1Q + 2Q), no T1/T2, no readout
+      thermal       : only T1/T2 relaxation, no depolarizing, no readout
+      readout       : only readout error, no gate noise
+      combined      : all channels together (from config)
+    """
+    print("\n" + "=" * 60)
+    print("  Noise Channel Ablation Study")
+    print("=" * 60)
 
-            # ------------------------
-            # Classical Model
-            # ------------------------
+    n_qubits = config["vqc"]["n_qubits"]
+    max_iter = config["vqc"]["max_iter"]
+    shots = config["vqc"]["shots"]
+    seed = config["experiment"]["seeds"][0]
+    n_folds = 3
 
-            clf = create_classical_model()
-
-            clf.fit(X_train, y_train)
-
-            c_acc = clf.score(X_test, y_test)
-
-            c_trial_acc.append(c_acc)
-
-        # Average over trials
-        quantum_avg = np.mean(q_trial_acc)
-        classical_avg = np.mean(c_trial_acc)
-
-        quantum_accuracies.append(quantum_avg)
-        classical_accuracies.append(classical_avg)
-
-        print(f"Quantum Avg Accuracy: {quantum_avg:.4f}")
-        print(f"Classical Avg Accuracy: {classical_avg:.4f}")
-
-    # Save Results
-    os.makedirs("results", exist_ok=True)
-
-    df = pd.DataFrame({
-        "Noise Level": noise_levels,
-        "Quantum Accuracy": quantum_accuracies,
-        "Classical Accuracy": classical_accuracies
-    })
-
-    df.to_csv(
-        "results/noise_results.csv",
-        index=False
+    X, y = generate_sensor_data(
+        n_samples=config["data"]["n_samples"],
+        n_features=config["data"]["n_features"],
+        snr=config["data"].get("signal_snr", 3.0),
+        seed=seed,
     )
 
-    # ------------------------
-    # Plot
-    # ------------------------
+    profiles = {
+        "ideal": build_noise_model(0, 0, 1e9, 1e9, 0),
+        "depolarizing_only": build_noise_model(
+            config["noise"]["depolarizing_1q"],
+            config["noise"]["depolarizing_2q"],
+            1e9, 1e9, 0,
+        ),
+        "thermal_only": build_noise_model(
+            0, 0,
+            config["noise"]["t1_us"],
+            config["noise"]["t2_us"],
+            0,
+        ),
+        "readout_only": build_noise_model(
+            0, 0, 1e9, 1e9,
+            config["noise"]["readout_error"],
+        ),
+        "all_combined": noise_model_from_config(config),
+    }
 
-    plt.figure(figsize=(8,5))
+    rows = []
+    for name, nm in profiles.items():
+        sampler, pm = build_noisy_sampler_and_pm(nm, shots=shots, seed=seed)
 
-    plt.plot(
-        noise_levels,
-        quantum_accuracies,
-        marker='o',
-        label='Quantum VQC'
+        def vqc_factory(s=sampler, p=pm):
+            return create_vqc(n_qubits=n_qubits, max_iter=max_iter, sampler=s, pass_manager=p, seed=seed)
+
+        print(f"  {name} ...", end=" ", flush=True)
+        mean_acc, std_acc = _cv_accuracy(vqc_factory, X, y, n_folds, seed)
+        print(f"acc={mean_acc:.3f}±{std_acc:.3f}")
+        rows.append({"noise_type": name, "accuracy_mean": mean_acc, "accuracy_std": std_acc})
+
+    df = pd.DataFrame(rows)
+    os.makedirs(output_dir, exist_ok=True)
+    df.to_csv(os.path.join(output_dir, "noise_type_ablation.csv"), index=False)
+
+    fig = plot_noise_type_ablation(df, output_dir=output_dir)
+    plt_close(fig)
+
+    print("\nAblation results:")
+    print(df.to_string(index=False))
+    return df
+
+
+def run_zne_effectiveness(config: dict, output_dir: str = "results") -> dict:
+    """
+    Compares: no mitigation vs ZNE mitigation under medium noise.
+    Returns dict with 'unmitigated' and 'zne' accuracy values.
+    """
+    print("\n" + "=" * 60)
+    print("  ZNE Mitigation Effectiveness")
+    print("=" * 60)
+
+    from mitigation.zero_noise_extrapolation import ZNEMitigator
+    from sklearn.model_selection import train_test_split
+
+    seed = config["experiment"]["seeds"][0]
+    n_qubits = config["vqc"]["n_qubits"]
+    max_iter = config["vqc"]["max_iter"]
+    shots = config["vqc"]["shots"]
+    zne_scales = config["mitigation"].get("zne_scale_factors", [1, 3, 5])
+
+    X, y = generate_sensor_data(
+        n_samples=config["data"]["n_samples"],
+        n_features=config["data"]["n_features"],
+        snr=config["data"].get("signal_snr", 3.0),
+        seed=seed,
     )
 
-    plt.plot(
-        noise_levels,
-        classical_accuracies,
-        marker='s',
-        label='Classical SVM'
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=seed, stratify=y
     )
 
-    plt.xlabel("Noise Level")
-    plt.ylabel("Accuracy")
+    nm = noise_model_from_config(config)
+    noisy_sampler, noisy_pm = build_noisy_sampler_and_pm(nm, shots=shots, seed=seed)
 
-    plt.title(
-        "Quantum vs Classical Under Noise"
+    print("  Training VQC with medium noise ...")
+    vqc = create_vqc(n_qubits=n_qubits, max_iter=max_iter, sampler=noisy_sampler, pass_manager=noisy_pm, seed=seed)
+    vqc.fit(X_train, y_train)
+
+    # Unmitigated accuracy
+    y_pred_noisy = vqc.predict(X_test)
+    acc_unmitigated = float(np.mean(y_pred_noisy == y_test))
+    print(f"  Unmitigated accuracy: {acc_unmitigated:.4f}")
+
+    # ZNE mitigated accuracy
+    mitigator = ZNEMitigator(
+        scale_factors=zne_scales,
+        noise_config=config["noise"],
     )
+    print(f"  Applying ZNE (scales={zne_scales}) ...")
+    y_pred_zne = mitigator.mitigated_predict(vqc, X_test)
+    acc_zne = float(np.mean(y_pred_zne == y_test))
+    print(f"  ZNE-mitigated accuracy: {acc_zne:.4f}")
+    print(f"  ZNE improvement: {acc_zne - acc_unmitigated:+.4f}")
 
-    plt.legend()
+    result = {
+        "unmitigated_accuracy": acc_unmitigated,
+        "zne_accuracy": acc_zne,
+        "zne_improvement": acc_zne - acc_unmitigated,
+    }
 
-    plt.grid(True)
-
-    plt.savefig(
-        "results/noise_comparison.png"
+    os.makedirs(output_dir, exist_ok=True)
+    pd.DataFrame([result]).to_csv(
+        os.path.join(output_dir, "zne_effectiveness.csv"), index=False
     )
+    return result
 
-    plt.show()
 
-    print("\nNoise analysis completed!")
+def plt_close(fig):
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
 
 if __name__ == "__main__":
-    run_noise_analysis()
+    import matplotlib.pyplot as plt
+
+    with open("config/base_config.yaml") as f:
+        config = yaml.safe_load(f)
+
+    run_quantum_noise_sweep(config)
+    run_noise_type_ablation(config)
+    run_zne_effectiveness(config)

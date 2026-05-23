@@ -71,8 +71,30 @@ def evaluate(
             "Run `python train.py` first to train and save a model."
         )
 
-    with open(model_path, "rb") as f:
-        vqc = pickle.load(f)
+    # cloudpickle handles VQC's local 'parity' function; fall back to pickle
+    try:
+        import cloudpickle
+        with open(model_path, "rb") as f:
+            loaded = cloudpickle.load(f)
+    except ImportError:
+        with open(model_path, "rb") as f:
+            loaded = pickle.load(f)
+
+    # Handle both: full VQC object and fallback reconstruction dict
+    if isinstance(loaded, dict) and "weights" in loaded and "n_qubits" in loaded:
+        print(f"  Loaded reconstruction dict from {model_path} — rebuilding VQC ...")
+        from models.vqc_model import create_vqc
+        from noise.noise_model import build_ideal_sampler_and_pm
+        sampler_r, pm_r = build_ideal_sampler_and_pm()
+        vqc = create_vqc(
+            n_qubits=loaded["n_qubits"],
+            reps=loaded["reps"],
+            sampler=sampler_r, pass_manager=pm_r,
+            seed=42,
+        )
+        vqc._fit_result = type("_FR", (), {"x": loaded["weights"]})()
+    else:
+        vqc = loaded
     print(f"  Loaded VQC from {model_path}")
 
     # Load training metadata if available

@@ -139,14 +139,35 @@ def train(config: dict, use_noise: bool = True, seed: int = None) -> dict:
     # ── Save artifacts ─────────────────────────────────────────────────────────
     os.makedirs("saved_models", exist_ok=True)
 
+    # 1. Weights (numpy array — always picklable)
+    np.save("saved_models/vqc_weights.npy", best_vqc.weights)
     with open("saved_models/vqc_params.pkl", "wb") as f:
         pickle.dump(best_vqc.weights, f)
 
-    with open("saved_models/vqc_model.pkl", "wb") as f:
-        pickle.dump(best_vqc, f)
+    # 2. Full model — VQC contains a local 'parity' function that standard
+    #    pickle cannot serialize.  cloudpickle handles local/lambda functions
+    #    and is available because scikit-learn depends on joblib which depends
+    #    on cloudpickle.
+    try:
+        import cloudpickle
+        with open("saved_models/vqc_model.pkl", "wb") as f:
+            cloudpickle.dump(best_vqc, f)
+        print("  Saved model to saved_models/vqc_model.pkl  (cloudpickle)")
+    except Exception as cp_err:
+        # Fallback: save a reconstruction dict (weights + config)
+        print(f"  cloudpickle unavailable ({cp_err}); saving weights + config only.")
+        recon = {
+            "weights": best_vqc.weights,
+            "n_qubits": n_qubits,
+            "reps": config["vqc"]["reps"],
+            "use_noise": use_noise,
+        }
+        with open("saved_models/vqc_model.pkl", "wb") as f:
+            pickle.dump(recon, f)
 
+    # 3. Metadata (always runs — moved after the try/except)
     metadata = {
-        "n_qubits": n_qubits,          # was bugged as "features": 4
+        "n_qubits": n_qubits,
         "n_features": config["data"]["n_features"],
         "n_samples": config["data"]["n_samples"],
         "reps": config["vqc"]["reps"],
@@ -165,7 +186,7 @@ def train(config: dict, use_noise: bool = True, seed: int = None) -> dict:
     with open("saved_models/metadata.pkl", "wb") as f:
         pickle.dump(metadata, f)
 
-    print(f"\n  Saved model to saved_models/vqc_params.pkl")
+    print(f"  Saved weights to saved_models/vqc_weights.npy")
     print(f"  Saved metadata to saved_models/metadata.pkl")
 
     # ── Convergence plot ───────────────────────────────────────────────────────

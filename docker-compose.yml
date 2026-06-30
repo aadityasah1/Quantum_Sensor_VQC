@@ -1,0 +1,8 @@
+services:
+  api:
+    build: .
+    image: quantum-sensor-vqc:1.0.0
+    container_name: qsensor-api
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

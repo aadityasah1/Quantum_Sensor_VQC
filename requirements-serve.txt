@@ -1,0 +1,11 @@
+# Serving dependencies for the REST API (inference only - no qiskit-aer needed,
+# inference uses the exact StatevectorEstimator from qiskit core).
+numpy==2.4.4
+scipy==1.17.1
+scikit-learn==1.8.0
+joblib==1.5.3
+qiskit==2.4.1
+qiskit-machine-learning==0.9.0
+fastapi==0.138.0
+uvicorn[standard]==0.49.0
+pydantic==2.13.4

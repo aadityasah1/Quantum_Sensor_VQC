@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "n_qubits": 4,
+  "L_reup": 3,
+  "n_features": 8,
+  "n_params": 48,
+  "seed": 42,
+  "classes": {
+    "0": "normal",
+    "1": "fault"
+  },
+  "metrics": {
+    "vqc_acc": 0.9583333333333334,
+    "vqc_f1": 0.9577464788732394,
+    "svm_acc": 1.0
+  },
+  "trained_seconds": 791.6
+}

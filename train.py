@@ -178,7 +178,7 @@ def train(config: dict, use_noise: bool = True, seed: int = None) -> dict:
         "cv_mean_accuracy": agg["accuracy"]["mean"],
         "cv_std_accuracy": agg["accuracy"]["std"],
         "cv_mean_f1": agg["f1"]["mean"],
-        "cv_mean_auc": agg["auc_roc"]["mean"],
+        "cv_mean_auc_roc": agg["auc_roc"]["mean"],
         "loss_histories": loss_histories,
         "best_fold": best_fold,
     }

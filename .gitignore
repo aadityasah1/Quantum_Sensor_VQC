@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Claude Code / agent worktrees
+.claude/worktrees/
+
+# LaTeX build artifacts
+*.aux
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
+*.out
+*.xdv
+
+# Logs, caches, OS/editor cruft
+*.log
+.DS_Store
+Thumbs.db
+tempCodeRunnerFile.py
